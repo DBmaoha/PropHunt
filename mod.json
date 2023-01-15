@@ -1,0 +1,14 @@
+{
+	"Name" : "PropHunt",
+	"Description" : "",
+	"Version": "1.0",
+	"LoadPriority": 2,
+	"RequiredOnClient": false,
+
+	"Scripts": [
+		{
+			"Path": "modifiers/gamemode_prophunt.gnut",
+			"RunOn": "SERVER && MP"
+		}
+	]
+}

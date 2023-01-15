@@ -1,0 +1,619 @@
+untyped // for Get/SetPlayerSettings()
+global function Modded_Gamemode_PropHunt_Init
+global function RegisterPropHuntMapProps
+
+const int PROPHUNT_TEAM_SEEKER = TEAM_IMC
+const int PROPHUNT_TEAM_HIDER = TEAM_MILITIA
+
+// for damaging spectating hiders
+const int PROPHUNT_DAMAGE_REQUIRED_FLAG = DF_CRITICAL
+
+struct PropHuntPlayerStruct
+{
+	entity boundProp
+	vector propSavePos
+	bool isSpectating // player will be able to spec
+}
+
+global struct PropHuntPropSetting // globaled for other files registering their props
+{
+	asset propAsset
+	int propHealth // larger props may need more health
+	vector propOffset = < 0,0,0 > // some props may need adjust origin, use this to do so, can leave empty
+	vector propAngles = < 0,0,0 > // some props may need adjust angles, use this to do so, can leave empty
+	string propPrintName = "" // what name the prop will show to player, can leave empty
+}
+
+struct
+{
+	float hidingTime
+	bool autobalance
+
+	float hidingStartTime
+
+	entity intermissionCam
+	array<entity> droppodSpawns
+	array<entity> validDropshipSpawns
+
+	table< entity, PropHuntPlayerStruct > propHuntPlayerTable
+
+	table< string, array<PropHuntPropSetting> > propHuntMapProps // for saving specific map's valid props
+} file
+
+void function Modded_Gamemode_PropHunt_Init()
+{
+	//RegisterDefaultMaps()
+	//nessie WTF
+	PrecacheModel( $"models/domestic/nessy_doll.mdl" )
+	//PropHuntMapPrecache()
+
+	RegisterSignal( "PropHuntHiderModeChange" )
+	
+	SetRoundBased( true )
+    SetSpawnpointGamemodeOverride( FFA ) // for randomly spawning hiders
+    Riff_ForceTitanAvailability( eTitanAvailability.Never )
+    Riff_ForceBoostAvailability( eBoostAvailability.Disabled )
+    SetRespawnsEnabled( false )
+    Riff_ForceSetEliminationMode( eEliminationMode.Pilots )
+    SetLoadoutGracePeriodEnabled( false )
+    
+    SetTimeoutWinnerDecisionFunc( PropHuntDecideWinner )
+    ClassicMP_SetCustomIntro( GamemodePropHuntIntroSetup, 0.0 )
+    ClassicMP_ForceDisableEpilogue( true )
+    
+	AddCallback_OnClientConnected( RegisterPropHuntPlayer )
+    AddCallback_OnPlayerRespawned( SetupPropHuntPlayer )
+    AddCallback_OnPlayerKilled( TryNotifyLastPlayerAlive )
+    AddSpawnCallback( "info_intermission", SetIntermissionCam )
+	AddDeathCallback( "player", OnPropHuntPlayerDeath )
+	AddSpawnCallback( "info_spawnpoint_droppod_start", AddDroppodSpawn )
+    AddSpawnCallback( "info_spawnpoint_dropship_start", AddDropshipSpawn )
+    
+    file.hidingTime = GetCurrentPlaylistVarFloat( "hideandseek_hiding_time", 60.0 )
+    file.autobalance = GetCurrentPlaylistVarInt( "hideandseek_balance_teams", 1 ) == 1
+}
+
+//////////////////////////////
+///// CALLBACK FUNCTIONS /////
+//////////////////////////////
+
+void function RegisterPropHuntPlayer( entity player )
+{
+	// init player table
+	PropHuntPlayerStruct emptyStruct
+	file.propHuntPlayerTable[ player ] <- emptyStruct
+
+	// offhand_special to toggle mode
+	AddButtonPressedPlayerInputCallback( player, IN_OFFHAND1, PropHuntHiderMode )
+}
+
+void function SetupPropHuntPlayer( entity player )
+{
+	if ( player.GetTeam() == PROPHUNT_TEAM_HIDER )
+	{
+		BecomePropHuntHider( player )
+	}
+	else
+	{
+		BecomePropHuntSeeker( player )
+	}
+}
+
+void function TryNotifyLastPlayerAlive( entity victim, entity attacker, var damageInfo )
+{
+	if ( victim.GetTeam() == PROPHUNT_TEAM_HIDER )
+	{
+		array<entity> hiders = GetPlayerArrayOfTeam( PROPHUNT_TEAM_HIDER )
+		if ( hiders.len() == 2 ) // 2nd to last hider is the one getting killed rn
+		{
+			// start music
+			CreateTeamMusicEvent( PROPHUNT_TEAM_SEEKER, eMusicPieceID.GAMEMODE_2, Time() )
+			CreateTeamMusicEvent( PROPHUNT_TEAM_HIDER, eMusicPieceID.GAMEMODE_2, Time() )
+
+			// let them know they're the last hider
+			Remote_CallFunction_NonReplay( hiders[ 0 ], "ServerCallback_LastHiderAlive" )
+			StimPlayer( hiders[ 0 ], 9999.9 ) // can't do endless since we don't get the visual effect in endless
+			
+			// tell seekers
+			foreach ( entity player in GetPlayerArrayOfTeam( PROPHUNT_TEAM_SEEKER ) )
+				Remote_CallFunction_NonReplay( player, "ServerCallback_LastHiderAlive" )
+		}
+	}
+}
+
+void function SetIntermissionCam( entity cam )
+{
+	file.intermissionCam = cam
+}
+
+void function OnPropHuntPlayerDeath( entity player, var damageInfo )
+{
+	entity boundProp = file.propHuntPlayerTable[ player ].boundProp
+	if ( IsValid( boundProp ) )
+	{
+		// leave a fx and sound!
+		PlayFX( $"P_plasma_exp_SM", boundProp.GetOrigin(), < 0 ,boundProp.GetAngles().y, 0 > )
+		EmitSoundAtPosition( TEAM_UNASSIGNED, boundProp.GetOrigin(), "Explo_TripleThreat_Impact_3P" )
+		// destroy related prop
+		boundProp.Destroy()
+		file.propHuntPlayerTable[ player ].boundProp = null
+	}
+
+	// leave a fx and sound!
+	/* // may not need to use player's attachment origin
+	int attachIndex = player.LookupAttachment( "CHESTFOCUS" )
+	vector fxPos = player.GetOrigin()
+	vector fxAng = player.GetAngles()
+	if ( attachIndex > 0 ) // has attachment!
+	{
+		fxPos = player.GetAttachmentOrigin( attachIndex )
+		fxAng = player.GetAttachmentAngles( attachIndex )
+	}
+	PlayFX( $"P_plasma_exp_SM", fxPos, < 0 ,fxAng.y, 0 > )
+	EmitSoundAtPosition( TEAM_UNASSIGNED, fxPos, "Explo_TripleThreat_Impact_3P" )
+	*/
+}
+
+void function AddDroppodSpawn( entity spawn )
+{
+	file.droppodSpawns.append( spawn )
+}
+
+void function AddDropshipSpawn( entity spawn )
+{
+	if ( spawn.HasKey( "gamemode_aitdm" ) ) // use aitdm's
+	{
+		if ( spawn.kv[ "gamemode_aitdm" ] == "0" ) // don't save this kind of spawnpoint
+			return
+	}
+	
+	file.validDropshipSpawns.append( spawn )
+}
+
+int function PropHuntDecideWinner()
+{
+	return PROPHUNT_TEAM_HIDER // on timeout, hiders always win
+}
+
+//////////////////////////////////
+///// CALLBACK FUNCTIONS END /////
+//////////////////////////////////
+
+
+
+///////////////////////////
+///// HIDER FUNCTIONS /////
+///////////////////////////
+
+void function PropHuntHiderMode( entity player )
+{
+	// revert state
+	bool lastState = file.propHuntPlayerTable[ player ].isSpectating
+	file.propHuntPlayerTable[ player ].isSpectating = !lastState
+
+	// signal to end threads
+	player.Signal( "PropHuntHiderModeChange" )
+}
+
+void function BecomePropHuntHider( entity player )
+{
+	// take all weapons
+	foreach ( entity weapon in player.GetMainWeapons() )
+		player.TakeWeaponNow( weapon.GetWeaponClassName() )
+	foreach ( entity offhand in player.GetOffhandWeapons() )
+		player.TakeWeaponNow( offhand.GetWeaponClassName() )
+
+	// hiders can't wall run
+	int skinIndex = player.GetSkin()
+	int camoIndex = player.GetCamo()
+	string setFile = player.GetPlayerSettings()
+	array<string> settingsMods = player.GetPlayerSettingsMods()
+	settingsMods.append( "disable_wallrun" )
+	player.SetPlayerSettingsWithMods( setFile, settingsMods )
+
+	// hider's are hidden and can't get shot, only their props do
+	player.kv.VisibilityFlags = 0 // we'll reset their model to a head afterwards
+	player.kv.CollisionGroup = 0 // make them have no collision with enemy
+	player.SetNameVisibleToEnemy( false ) // don't show name
+	player.NotSolid() // make them can't get shot
+
+	// set model to pulse blade pilots -- this model can only have a head left
+	player.SetModel( $"models/humans/pilots/pilot_medium_reaper_m.mdl" )
+	int bodyGroupIndex = player.FindBodyGroup( "body" )
+	player.SetBodygroup( bodyGroupIndex, 1 ) // blank index
+	bodyGroupIndex = player.FindBodyGroup( "legs" )
+	player.SetBodygroup( bodyGroupIndex, 0 ) // blank index
+	// restore skin & camo
+	player.SetSkin( skinIndex )
+	player.SetCamo( camoIndex )
+
+	// give an empty weapon, it's able to zoom!
+	player.GiveWeapon( "mp_weapon_gunship_missile" )
+	player.SetActiveWeaponByName( "mp_weapon_gunship_missile" )
+	thread HiderWeaponLimiter( player )
+
+	// maybe a single signal is enough?
+	// tell players about the button( offhand1 ), must match registered button
+	player.GiveOffhandWeapon( "mp_ability_shifter_super", OFFHAND_SPECIAL )
+
+	/* // unused
+	// telling players about the stat changes( by activating shifter )
+	player.GiveOffhandWeapon( "mp_ability_shifter_super", OFFHAND_SPECIAL, ["prophunt_changemode"] )
+	// gamemode specific grenade, stuns seekers
+	player.GiveOffhandWeapon( "mp_weapon_grenade_electric_smoke", OFFHAND_ORDNANCE, ["shellshocker"] )
+	*/
+
+	// create player's own prop
+	PropHuntPropSetting propSetting = GetCurrentMapPropSetting_Random()
+	asset propAsset = propSetting.propAsset
+	int propHealth = propSetting.propHealth
+	
+	entity prop = CreatePropScript( propAsset )
+	file.propHuntPlayerTable[ player ].boundProp = prop // link it with table
+	BindPropToPlayer( player, prop )
+	// prop damage settings
+	SetObjectCanBeMeleed( prop, false ) // prevent meleeing the prop
+	prop.kv.fadedist = 10000 // never fade!
+	prop.kv.solid = SOLID_VPHYSICS // make it attackable and do collision with seekers
+	prop.SetOwner( player ) // so owner hider won't have collision with it, for them using items
+	SetTeam( prop, player.GetTeam() ) // set prop's team
+	Highlight_SetOwnedHighlight( prop, "sp_friendly_hero" ) // owner highlight
+	prop.Highlight_SetParam( 3, 0, < 0, 100, 190 > ) // owned, green
+	Highlight_SetFriendlyHighlight( prop, "sp_friendly_hero" ) // friendly highlight
+	SetForceDrawWhileParented( prop, true ) // so the prop will show to other players
+	AddEntityCallback_OnDamaged( prop, OnPlayerPropDamaged ) // maybe use post damage callbacks for damaging their owner?
+	// update player's settings
+	player.SetMaxHealth( propHealth )
+	player.SetHealth( propHealth )
+
+	thread PropHuntHiderThink( player ) // thread this, the main mechanic of hiders
+}
+
+void function PropHuntHiderThink( entity player )
+{
+	player.EndSignal( "OnDestroy" )
+	player.EndSignal( "OnDeath" )
+
+	while( true )
+	{
+		if ( file.propHuntPlayerTable[ player ].isSpectating )
+			waitthread HiderSpectating( player )
+		else
+			waitthread HiderHiding( player )
+	}
+	// set visibility flags if we're hiding, so seekers can't see us on intermission cam
+	if ( Time() - file.hidingStartTime < file.hidingTime )
+		player.kv.VisiblityFlags = ENTITY_VISIBLE_TO_FRIENDLY
+}
+
+void function HiderSpectating( entity player )
+{
+	// "OnDestroy" and "OnDeath" should be in the function that waitthreads this
+
+	OnThreadEnd(
+		function(): ( player )
+		{
+			if ( IsValid( player ) )
+			{
+				RemoveEntityCallback_OnDamaged( player, OnSpectatingPlayerDamaged ) // remove damage reduction
+				player.Server_TurnOffhandWeaponsDisabledOff() // restore offhand usage
+			}
+		}
+	)
+
+	player.Server_TurnOffhandWeaponsDisabledOn() // disable other offhand weapons
+	player.kv.VisibilityFlags = ENTITY_VISIBLE_TO_FRIENDLY // show the head model to friendly, so they can see other hiders spectating
+	AddEntityCallback_OnDamaged( player, OnSpectatingPlayerDamaged ) // spectating player won't take damages other than their prop taken
+	entity prop = file.propHuntPlayerTable[ player ].boundProp
+	if ( IsValid( prop ) )
+	{
+		ReleasePropForPlayer( player, prop )
+	}
+	player.SetPhysics( MOVETYPE_NOCLIP ) // start free watching
+
+	player.WaitSignal( "PropHuntHiderModeChange" ) // ends when player manually change mode
+}
+
+void function HiderHiding( entity player )
+{
+	// "OnDestroy" and "OnDeath" should be in the function that waitthreads this
+
+	player.SetPhysics( MOVETYPE_WALK ) // stop free watching
+
+	entity prop = file.propHuntPlayerTable[ player ].boundProp
+	if ( IsValid( prop ) )
+	{
+		// set player to prop's origin
+		player.SetOrigin( prop.GetOrigin() )
+		player.SetAngles( prop.GetAngles() )
+		BindPropToPlayer( player, prop )
+	}
+
+	player.SetVelocity( < 0,0,0 > ) // reset vel!
+	player.kv.VisibilityFlags = 0 // hide player
+
+	player.WaitSignal( "PropHuntHiderModeChange" ) // ends when player manually change mode
+}
+
+///////////////////////////////
+///// HIDER FUNCTIONS END /////
+///////////////////////////////
+
+
+
+///////////////////////////////////
+///// HIDER UTILITY FUNCTIONS /////
+///////////////////////////////////
+
+// prevent players firing shifter
+void function HiderWeaponLimiter( entity player )
+{
+	player.EndSignal( "OnDestroy" )
+	player.EndSignal( "OnDeath" )
+
+	while ( true )
+	{
+		WaitFrame()
+		entity activeWeapon = player.GetActiveWeapon()
+		if ( !IsValid( activeWeapon ) )
+			continue
+		if ( activeWeapon.GetWeaponClassName() == "mp_ability_shifter_super" )
+			player.SetActiveWeaponByName( "mp_weapon_gunship_missile" ) // reset to empty weapon
+	}
+}
+
+void function OnSpectatingPlayerDamaged( entity player, var damageInfo )
+{
+	int damageType = DamageInfo_GetCustomDamageType( damageInfo )
+
+	// the certain damageType that forces spectating hiders take damage
+	if ( !( damageType & PROPHUNT_DAMAGE_REQUIRED_FLAG ) )
+		DamageInfo_SetDamage( damageInfo, 0 )
+}
+
+void function OnPlayerPropDamaged( entity prop, var damageInfo )
+{
+	// the certain damageType that forces spectating hiders take damage
+	DamageInfo_AddCustomDamageType( damageInfo, PROPHUNT_DAMAGE_REQUIRED_FLAG )
+
+	entity player = prop.GetOwner()
+	// damage the player
+	player.TakeDamage( 
+		DamageInfo_GetDamage( damageInfo ), 
+		DamageInfo_GetAttacker( damageInfo ), 
+		DamageInfo_GetInflictor( damageInfo ), 
+		{ // damage table
+			weapon = DamageInfo_GetWeapon( damageInfo ), // do this work? for supporting tactical_cdr_on_kill
+			origin = DamageInfo_GetDamagePosition( damageInfo ), 
+			force = DamageInfo_GetDamageForce( damageInfo ), 
+			scriptType = DamageInfo_GetCustomDamageType( damageInfo ), 
+			damageSourceId = DamageInfo_GetDamageSourceIdentifier( damageInfo ) // proper damageSource for now
+		}
+	)
+
+	DamageInfo_SetDamage( damageInfo, 0 ) // never kills the prop
+}
+
+void function ReleasePropForPlayer( entity player, entity prop )
+{
+	PropHuntPropSetting propSetting = GetPropSettingFromAsset( prop.GetModelName() )
+	prop.ClearParent() // release the prop
+	prop.SetOrigin( player.GetOrigin() + propSetting.propOffset ) // set it to player's exact position + offset from settings
+	prop.SetAngles( < 0, player.EyeAngles().y, 0 > + propSetting.propAngles ) // rotate it to player's angles( only yaw needed ) + angles from settings
+	prop.kv.VisibilityFlags = ENTITY_VISIBLE_TO_EVERYONE // restore owner visibility
+}
+
+void function BindPropToPlayer( entity player, entity prop )
+{
+	PropHuntPropSetting propSetting = GetPropSettingFromAsset( prop.GetModelName() )
+	prop.SetParent( player, "ORIGIN" ) // needs testing, this may not be the best attachment
+	prop.SetOrigin( propSetting.propOffset )
+	prop.SetAngles( propSetting.propAngles )
+	prop.kv.VisibilityFlags = ENTITY_VISIBLE_TO_FRIENDLY | ENTITY_VISIBLE_TO_ENEMY // take owner visibility
+}
+
+// for half time event, change all player's models
+void function HalfTimeChangeModel( entity player )
+{
+
+}
+
+///////////////////////////////////////
+///// HIDER UTILITY FUNCTIONS END /////
+///////////////////////////////////////
+
+
+
+////////////////////////////
+///// SEEKER FUNCTIONS /////
+////////////////////////////
+
+void function BecomePropHuntSeeker( entity player )
+{
+	// !!! hardcoded below
+	entity tactical = player.GetOffhandWeapon( OFFHAND_SPECIAL )
+	entity ordnance = player.GetOffhandWeapon( OFFHAND_ORDNANCE )
+
+	// seekers should not have pulse blade
+	if ( tactical.GetWeaponClassName() == "mp_weapon_grenade_sonar" )
+	{
+		player.TakeWeaponNow( "mp_weapon_grenade_sonar" )
+		player.GiveOffhandWeapon( "mp_ability_grapple", OFFHAND_SPECIAL ) // give them a grapple instead
+	}
+	player.TakeWeaponNow( ordnance.GetWeaponClassName() ) // no ordnance for seekers
+	player.TakeWeaponNow( "melee_pilot_emptyhanded" ) // no melee for seekers
+
+	// take out weapons other than main weapon
+	foreach ( int index, entity weapon in player.GetMainWeapons() )
+	{
+		if ( index != 0 ) // not the first weapon?
+			player.TakeWeaponNow( weapon.GetWeaponClassName() ) // take it
+	}
+	
+	Highlight_SetFriendlyHighlight( player, "sp_friendly_pilot" ) // highlight seekers for teammates
+}
+
+////////////////////////////////
+///// SEEKER FUNCTIONS END /////
+////////////////////////////////
+
+
+
+/////////////////////////////
+///// UTILITY FUNCTIONS /////
+/////////////////////////////
+
+PropHuntPropSetting function GetCurrentMapPropSetting_Random()
+{
+	string mapName = GetMapName()
+	if ( mapName in file.propHuntMapProps ) // is current map registered?
+	{
+		array<PropHuntPropSetting> validAssets = file.propHuntMapProps[ mapName ]
+		return validAssets[ RandomInt( validAssets.len() ) ] // pick a random one
+	}
+
+	// not a registered map
+	return DefaultPropSetting() // a nessy doll
+}
+
+PropHuntPropSetting function GetPropSettingFromAsset( asset propAsset )
+{
+	string mapName = GetMapName()
+	if ( mapName in file.propHuntMapProps ) // registered maps
+	{
+		foreach( PropHuntPropSetting curSetting in file.propHuntMapProps[ mapName ] )
+		{
+			if ( curSetting.propAsset == propAsset )
+				return curSetting
+		}
+	}
+	
+	// not a registered map or model asset not found
+	return DefaultPropSetting() // a nessy doll
+}
+
+PropHuntPropSetting function DefaultPropSetting()
+{
+	PropHuntPropSetting tempStruct
+	tempStruct.propAsset = $"models/domestic/nessy_doll.mdl" // becomes nessy doll?
+	tempStruct.propHealth = 50 // lower health
+
+	return tempStruct
+}
+
+void function RegisterPropHuntMapProps( string mapName, array<PropHuntPropSetting> newPropSettings )
+{
+	file.propHuntMapProps[ mapName ] <- newPropSettings // add this to table
+}
+
+/////////////////////////////////
+///// UTILITY FUNCTIONS END /////
+/////////////////////////////////
+
+
+
+///////////////////////////
+///// INTRO FUNCTIONS /////
+///////////////////////////
+
+void function GamemodePropHuntIntroSetup()
+{
+	AddCallback_GameStateEnter( eGameState.Prematch, PropHuntIntroPrematch )
+	AddCallback_OnClientConnected( AddPlayerToPropHuntIntro )
+}
+
+void function AddPlayerToPropHuntIntro( entity player )
+{
+	if ( GetGameState() < eGameState.Prematch || Time() - file.hidingStartTime > file.hidingTime )
+		return
+	
+	// seeker/hider autobalance
+	// try to have 1/6 of players be seekers
+	if ( file.autobalance )
+	{
+		int wantedSeekers = int( max( 1, GetPlayerArray().len() / 4 ) ) // for 20 players, it will have 4 seekers and 16 hiders
+		
+		if ( GetPlayerArrayOfTeam( PROPHUNT_TEAM_SEEKER ).len() < wantedSeekers )
+			SetTeam( player, PROPHUNT_TEAM_SEEKER )
+		else
+			SetTeam( player, PROPHUNT_TEAM_HIDER )
+	}
+	
+	ScreenFadeFromBlack( player, 1.0, 0.75 )
+	Remote_CallFunction_NonReplay( player, "ServerCallback_ShowHideAndSeekCountdown", file.hidingStartTime + file.hidingTime )
+		
+	if ( player.GetTeam() == PROPHUNT_TEAM_HIDER )
+		thread HiderIntroThread( player )
+	else 
+		thread SeekerIntroThread( player )
+	
+	thread DelayedRoleAnnounce( player )
+}
+
+void function PropHuntIntroPrematch()
+{
+	ClassicMP_OnIntroStarted()
+	
+	file.hidingStartTime = Time()
+	foreach ( entity player in GetPlayerArray() )
+		AddPlayerToPropHuntIntro( player )
+	
+	// this intro is mostly done in playing, so just finish the intro up now and we can do fully custom logic from here
+	wait 2.5
+	ClassicMP_OnIntroFinished()
+	
+	thread GlobalSeekerIntroThread()
+}
+
+void function HiderIntroThread( entity player )
+{
+	player.EndSignal( "OnDestroy" )
+	// need to wait a frame in case we're joining after eGameState.Playing, in which case we'll be turned into a spectator on first frame
+	WaitFrame()
+	RespawnAsPilot( player )
+} 
+
+void function SeekerIntroThread( entity player )
+{
+	player.EndSignal( "OnDestroy" )
+	MuteHalfTime( player )
+
+	player.SetObserverModeStaticPosition( file.intermissionCam.GetOrigin() )
+	player.SetObserverModeStaticAngles( file.intermissionCam.GetAngles() )
+	player.StartObserverMode( OBS_MODE_STATIC_LOCKED )
+	
+	wait ( file.hidingStartTime + file.hidingTime ) - Time()
+	UnMuteAll( player )
+}
+
+void function DelayedRoleAnnounce( entity player )
+{
+	wait 1.75
+	Remote_CallFunction_NonReplay( player, "ServerCallback_AnnounceHideAndSeekRole" )
+}
+
+void function GlobalSeekerIntroThread()
+{
+	wait file.hidingTime
+	
+	// start music
+	CreateTeamMusicEvent( PROPHUNT_TEAM_SEEKER, eMusicPieceID.GAMEMODE_1, Time() )
+	CreateTeamMusicEvent( PROPHUNT_TEAM_HIDER, eMusicPieceID.GAMEMODE_1, Time() )
+
+	// notify hiders!
+	foreach ( entity hider in GetPlayerArrayOfTeam( PROPHUNT_TEAM_HIDER ) )
+		Remote_CallFunction_NonReplay( hider, "ServerCallback_SeekersIncoming" )
+
+	array<entity> seekers = GetPlayerArrayOfTeam( PROPHUNT_TEAM_SEEKER )
+	entity podSpawn
+	if ( file.droppodSpawns.len() != 0 )
+		podSpawn = file.droppodSpawns.getrandom()
+	else
+		podSpawn = SpawnPoints_GetPilot().getrandom()
+	
+	SpawnPlayersInDropPod( seekers, podSpawn.GetOrigin(), podSpawn.GetAngles() )
+}
+
+///////////////////////////////
+///// INTRO FUNCTIONS END /////
+///////////////////////////////
