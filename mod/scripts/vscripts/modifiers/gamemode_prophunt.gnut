@@ -1,6 +1,7 @@
 untyped // for Get/SetPlayerSettings()
 global function Modded_Gamemode_PropHunt_Init
-global function RegisterPropHuntMapProps
+global function RegisterPropHuntMapProp
+global function RegisterPropHuntMultipleMapProps
 
 const int PROPHUNT_TEAM_SEEKER = TEAM_IMC
 const int PROPHUNT_TEAM_HIDER = TEAM_MILITIA
@@ -42,10 +43,9 @@ struct
 
 void function Modded_Gamemode_PropHunt_Init()
 {
-	//RegisterDefaultMaps()
 	//nessie WTF
 	PrecacheModel( $"models/domestic/nessy_doll.mdl" )
-	//PropHuntMapPrecache()
+	//PropHuntPrecache()
 
 	RegisterSignal( "PropHuntHiderModeChange" )
 	
@@ -501,9 +501,26 @@ PropHuntPropSetting function DefaultPropSetting()
 	return tempStruct
 }
 
-void function RegisterPropHuntMapProps( string mapName, array<PropHuntPropSetting> newPropSettings )
+// for registering a single prop
+void function RegisterPropHuntMapProp( string mapName, PropHuntPropSetting propSetting )
 {
-	file.propHuntMapProps[ mapName ] <- newPropSettings // add this to table
+	if ( !( mapName in file.propHuntMapProps ) ) // not registered yet
+	{
+		array<PropHuntPropSetting> emptyArray
+		file.propHuntMapProps[ mapName ] <- emptyArray // init the table
+		file.propHuntMapProps[ mapName ].append( propSetting ) // add it to table
+	}
+	else // once registered
+		file.propHuntMapProps[ mapName ].append( propSetting ) // add it to table
+}
+
+// for registering multiple props
+void function RegisterPropHuntMultipleMapProps( string mapName, array<PropHuntPropSetting> newPropSettings )
+{
+	if ( !( mapName in file.propHuntMapProps ) ) // not registered yet
+		file.propHuntMapProps[ mapName ] <- newPropSettings // init, add them to table
+	else // once registered
+		file.propHuntMapProps[ mapName ].extend( newPropSettings ) // add them to table
 }
 
 /////////////////////////////////

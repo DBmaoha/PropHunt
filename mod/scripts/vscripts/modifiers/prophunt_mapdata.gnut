@@ -1,0 +1,33 @@
+global function PropHunt_MapData_Init
+
+void function PropHunt_MapData_Init()
+{
+    RegisterDefaultMaps()
+}
+
+void function RegisterDefaultMaps()
+{
+
+}
+
+/* // How to Use
+    To register prop settings for a certain map...
+    Define a function named "RegisterPropHuntMap_MAPNAME"
+    Put settings inside a struct
+
+    Example:
+    // better leave a commentary here about this prop's name and size
+    PropHuntPropSetting example
+    example.propAsset = <asset>         // the prop's modelName
+    example.propHealth = <int>          // the prop's health, larger props may need more health
+    example.propOffset = <vector>       // some props may need adjust origin, use this to do so, can leave empty
+    example.propAngles = <vector>       // some props may need adjust angles, use this to do so, can leave empty
+    example.propPrintName = <string>    // what name the prop will show to player, can leave empty
+
+    Then use RegisterPropHuntMapProp( MAPNAME, example ) to register this setting
+    Or you can use RegisterPropHuntMultipleMapProps( MAPNAME, array<PropHuntPropSetting> ) to register multiple settings
+*/
+
+void function RegisterPropHuntMap_Glitch()
+{
+}

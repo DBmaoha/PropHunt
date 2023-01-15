@@ -9,6 +9,13 @@
 		{
 			"Path": "modifiers/gamemode_prophunt.gnut",
 			"RunOn": "SERVER && MP"
+		},
+		{
+			"Path": "modifiers/prophunt_mapdata.gnut",
+			"RunOn": "SERVER && MP",
+			"ServerCallback": {
+				"After": "PropHunt_MapData_Init"
+			}
 		}
 	]
 }
